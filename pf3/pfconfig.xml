@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<config>
+  <directories>
+    <dir name="rjis" value="s:/"/>
+    <dir name="filterset" value="q:\pf3\filterset"/>
+    <dir name="idms" value="B:\Users\Adrian\ukrail\idms-data"/>
+    <dir name="docroot" value="Q:\pf3\webtesters"/>
+    <dir name="aux" value="Q:\pf3\auxfiles" />
+  </directories>
+  <network>
+    <!-- address is either 127.0.0.1 or 0.0.0.0. 0 is a synonym for 0.0.0.0. If you use 127.0.0.1 only
+    connections from within the same device will work. If you use zero, the server is open for any device
+    to connect -->
+    <endpoint address="0" port="80"/>
+  </network>
+</config>
+
+

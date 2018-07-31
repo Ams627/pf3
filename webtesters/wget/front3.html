@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>Powerfares Test</title>
+
+<link rel="stylesheet" href="jui/jquery-ui.min.css">
+
+<style type='text/css'>
+body {
+    font-size: 1.5em;
+}
+.imp1 {
+    margin-left:5%;
+    font-size:1.2em;
+}
+
+.sub {
+    margin-left:5%;
+    font-size:1.2em;
+}
+
+.d1 {
+    width: 1000px;
+    clear: both;
+}
+.d1 input {
+    width: 100%;
+    clear: both;
+}
+.tbox {
+    font-size:1.5em;
+    width:80%;
+    height:100px;
+}
+
+.faretable, td {
+    border:solid 1px #f5cbcb;
+    border-collapse:collapse;
+    padding-left:0.5em;
+    padding-right:0.5em;
+}
+
+.faretable {
+    margin-bottom:2em;
+}
+
+.GBP {
+    text-align:right;
+}
+.farespec {
+    font-weight:600;
+}
+</style>
+<script src="jquery-2.1.4.min.js"></script>
+<script src="locations.js"></script>
+<script src="jui/external/jquery/jquery.js"></script>
+<script src="jui/jquery-ui.min.js"></script>
+<script>function startup() { $("#o").focus(); }</script>
+</head>
+
+<body onload="startup()">
+<div class="d1">
+<form id="target">
+  <label>Origin: </label><input class="imp1" maxlength="40" type="text" autocomplete="on" id="o" name="o"><br>
+  <label>Destination:</label> <input class="imp1" maxlength="40" type="text" autocomplete="on" id="d" name="d"><br>
+  <label>Railcard:</label> <input class="imp1" maxlength="3" type="text" autocomplete="on" id="r" name="r"><br><br>
+  <input class="sub" type="submit" value="Get Fares">
+</form>
+</div>
+<div id="fares"></div>
+
+<script>
+    var stations = railLocations.map(function (stationEntry) {
+        var displayname = stationEntry.name.trim() + " (" + stationEntry.nlc + ")";
+        var obj = { "label": displayname, "value": displayname, "id": stationEntry.nlc };
+        return obj;
+    })
+    $("#o").autocomplete({ source: stations, delay: 0, autoFocus: true, select: function (event, ui) { requestOrigin = ui.item.id; } });
+    $("#d").autocomplete({ source: stations, delay: 0, autoFocus: true, select: function (event, ui) { requestDestination = ui.item.id; } });
+    function ToGBP2(s)  { return (parseInt(s) / 100).toLocaleString("en-GB", { style: "currency", currency: "GBP", minimumFractionDigits: 2 })    }
+    function ToGBP(n) {
+        s = n.toString();
+        return "&pound;" + s.substr(0, s.length - 2) + "." + s.substr(s.length - 2);
+    }
+
+    $("#target").submit(function (event) {
+        document.getElementById("fares").innerHTML = "";
+        var uri = "http://localhost:1234/PFRJIS?o=" + requestOrigin + "&d=" + requestDestination + "&r=" + $('#r').val();
+        $.get(uri, function (data) {
+            console.log(data);
+            jinfo = JSON.parse(data);
+            console.log("parsed\n");
+            var s = "";
+            jinfo.journey.map(function (flow) {
+                s += "<p class=\"farespec\">" + flow.orig + " to " + flow.dest + " route: " + flow.route + " flowid: " + flow.flowid + " (discount: " + flow.discount + ")</p>\n<table class=\"faretable\"";
+                flow.fares.map(function (fare) {
+                    s += "<tr><td>" + fare.ticketcode + "</td><td class=\"GBP\">" + ToGBP(fare.adult) + "</td><td class=\"GBP\">" + ToGBP(fare.child) + "</td><td>" + fare.rescode + "</td></tr>";
+                });
+                s += "</table>";
+            });
+            document.getElementById("fares").innerHTML = s;
+            $("#o").focus();
+});
+  event.preventDefault();
+});
+</script>
+</body>
+</html>

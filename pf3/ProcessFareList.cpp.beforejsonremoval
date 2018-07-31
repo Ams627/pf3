@@ -1,0 +1,626 @@
+#include "stdafx.h"
+#include "ProcessFareList.h"
+#include "RJISMaps.h"
+#include "NDFProcessor.h"
+
+
+struct NDFFoundKey
+{
+    RouteCode route_;					// five digit route code
+    TicketCode ticketCode_;				// three letter RJIS ticket code
+    NDFFoundKey() = default;
+    NDFFoundKey(RouteCode route, TicketCode ticketcode) : route_(route), ticketCode_(ticketcode) {}
+    bool operator<(const NDFFoundKey& other) const
+    {
+        return std::forward_as_tuple(route_, ticketCode_) <
+            std::forward_as_tuple(other.route_, other.ticketCode_);
+    }
+};
+
+struct FoundFareKey
+{
+    UFlow flow_;
+    RouteCode route_;
+    RailcardCode railcard_;
+    TicketCode ticketcode_;
+    bool operator<(const FoundFareKey& other) const
+    {
+        return std::forward_as_tuple(flow_, route_, railcard_, ticketcode_) <
+            std::forward_as_tuple(other.flow_, other.route_, other.railcard_, other.ticketcode_);
+    }
+};
+
+struct FoundFareValue
+{
+    bool isNDF;
+    bool isFirst;
+    Fare adultPrice;
+    Fare childPrice;
+};
+
+std::string JSONAddNV(std::string name, std::string value)
+{
+    std::string result = "\"" + name + "\": " + "\"" + value + "\"";
+    return result;
+}
+
+std::string JSONAddNV(std::string name, int value)
+{
+    std::string result = "\"" + name + "\": " + std::to_string(value);
+    return result;
+}
+
+std::string JSONAddNV(std::string name, unsigned int value)
+{
+    std::string result = "\"" + name + "\": " + "\"" + std::to_string(value) + "\"";
+    return result;
+}
+
+
+// given an RJIS percentage 0-999 reprenting 0-99.9% calculate the final price. We round UP to the nearest penny THEN round to the nearest 5p:
+unsigned Rounding(unsigned x, unsigned  percent)
+{
+	return ((x * (1000 - percent) + 999) / 1000 + 2) / 5 * 5;
+}
+
+// GetRelatedStations - given a station NLC and a travel date, return a list of related stations.
+//						most of the time this list will be empty or contain a single entry in the case of a
+//						station like Dorchester South which is a member of a group.
+template <class Cont> void GetRelatedStations(Cont& container, const UNLC nlc, RJISDate::Date travelDate)
+{
+	// this map is a list of London zone NLCs to use when the Locations file indicates that station NLC is
+	// a member of a zone (.LOC file column 84).
+	// There is no definitive documentation for this list, so we use what we can infer from examining the name of 
+	// the location in the .LOC file:
+	//static std::map<char, std::vector<std::string>> extraZoneStations = 
+	//{
+	//	// AMS need careful checking of these:
+	//	{ '1', {"0032", "0033", "0034", "0035", "0051", "0064", "0065", "0785", "0786", "0790", "0791", "0792"} },
+	//	{ '2', {"0032", "0033", "0034", "0035", "0036", "0037", "0038", "0041", "0052", "0063", "0064", "0065", "0066", "0786",  "0790", "0791", "0792", "0793", "0797", "0825", "0829"} },
+	//	{ '3', {"0033", "0034", "0035", "0036", "0037", "0038", "0039", "0040", "0042", "0053", "0062", "0063", "0064", "0066",  "0067", "0791", "0792", "0797", "0825", "0829", "0830", "0835", "0839" } },
+	//	{ '4', {"0034", "0035", "0037", "0038", "0039", "0040", "0043", "0054", "0057", "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0792" } },
+	//	{ '5', {"0035", "0038", "0040", "0044", "0055", "0057", "0060", "0061", "0062", "0063", "0064", "0065", "0066", "0067", "0068", "0069", "0786", "0829", "0839", "0844", "0847" }},
+	//	{ '6', {"0035", "0038", "0040", "0055", "0057", "0059", "0070", "0072", "0786", "0829", "0839", "0844", "0847" }}
+	//};
+
+	RJISDate::Date today(RJISDate::Date::Today());
+
+    auto p = RJISMaps::locations.equal_range(nlc);
+	for (auto nlcEntry = p.first; nlcEntry != p.second; ++nlcEntry)
+    {
+		auto& loc = nlcEntry->second;
+		if (loc.seqDates_.GetQuoteDate() <= today && loc.seqDates_.GetStartDate() <= travelDate && loc.seqDates_.GetEndDate() >= today)
+		{
+			// add the groups of which the station is a member - these are the M-records of RJIS5045
+            auto p = RJISMaps::groups.find(nlc);
+            if (p != RJISMaps::groups.end())
+            {
+                // iterate over the inner map, getting
+                for (auto groupEntry : p->second)
+                {
+                    // iterate along the vector of end dates:
+                    for (auto endDate : groupEntry.second)
+                    {
+                        if (endDate >= today)
+                        {
+                            container.push_back(groupEntry.first);
+                        }
+                    }
+                }
+            }
+
+			// Add the county code from the location L-Record - these are rarely used but they are important in some
+			// cases:
+			std::string countyCode = "CC" + loc.county_.GetString();
+			UNLC countyNLC(countyCode);
+			container.push_back(countyNLC);
+
+			// add the London Travelcard zones:
+			if (loc.zoneNumber_ >= '1' && loc.zoneNumber_ <= '6')
+			{
+                std::cout << "adding zone " << loc.zoneNLC_ << std::endl;
+                container.push_back(loc.zoneNLC_);
+			}
+		}
+    }
+}
+
+// returns a match from a list of non-standard discounts - everything (route, railcard, ticketcode) has to match, but an
+// exact match is always a "better quality" match than a wildcard match. A non-match returns -1
+int GetMatchQuality(const RJISTypes::NSDiscEntry& fns, const RouteCode& route, const RailcardCode& railcard, const TicketCode& ticketcode)
+{
+    uint32_t matchQuality = 0;
+    if (route == fns.route_)
+    {
+        matchQuality |= 0b10'00'00;
+    }
+    else if (fns.route_ == "*****")
+    {
+        matchQuality |= 0b01'00'00;
+    }
+    else
+    {
+        matchQuality = -1;
+    }
+    if (matchQuality >= 0)
+    {
+        if (railcard == fns.railcard_)
+        {
+            matchQuality |= 0b00'10'00;
+        }
+        else if (fns.railcard_ == "***")
+        {
+            matchQuality |= 0b00'01'00;
+        }
+        else
+        {
+            matchQuality = -1;
+        }
+    }
+    if (matchQuality >= 0)
+    {
+        if (ticketcode == fns.ticketCode_)
+        {
+            matchQuality |= 0b00'00'10;
+        }
+        else if (fns.ticketCode_ == "***")
+        {
+            matchQuality |= 0b00'00'01;
+        }
+        else
+        {
+            matchQuality = -1;
+        }
+    }
+    return matchQuality;
+}
+
+// return an iterator into the NSD deque representing the best match. If there is no possible match then
+// return RJISMaps::nonStandardDiscounts.end():
+decltype(RJISMaps::nonStandardDiscounts)::iterator GetNonStandardDiscount(
+    UFlow flow,                         // origin and destination
+    RouteCode route,                    // 5 digit route code
+    RailcardCode railcard,              // 3 character railcard code
+    TicketCode ticketcode,              // 3 character ticket code
+    RJISDate::Date currentDate,         // date of searching
+    RJISDate::Date travelDate           // date of travel
+    )
+{
+    auto ofound = RJISMaps::nsdOriginIndex.equal_range(flow.origin);
+    int maxMatchQuality = 0;
+    decltype(RJISMaps::nonStandardDiscounts)::iterator bestMatch = std::end(RJISMaps::nonStandardDiscounts);
+
+    for (auto p = ofound.first; p != ofound.second; ++p)
+    {
+        // get a reference to the non-standard discount stored in the deque
+        auto& fns = *(p->second);
+        if (fns.dates_.GetQuoteDate() <= currentDate && fns.dates_.GetStartDate() <= travelDate && fns.dates_.GetEndDate() >= travelDate)
+        {
+            auto matchQuality = GetMatchQuality(fns, route, railcard, ticketcode);
+            if (matchQuality > maxMatchQuality)
+            {
+                maxMatchQuality = matchQuality;
+                bestMatch = p->second;
+            }
+        }
+    }
+    // if we didn't find a match, then look at the destinations
+    if (maxMatchQuality < 1)
+    {
+        auto dfound = RJISMaps::nsdDestinationIndex.equal_range(flow.destination);
+        for (auto p = dfound.first; p != dfound.second; ++p)
+        {
+            // get a reference to the non-standard discount stored in the deque
+            auto& fns = *(p->second);
+            if (fns.dates_.GetQuoteDate() <= currentDate && fns.dates_.GetStartDate() <= travelDate && fns.dates_.GetEndDate() >= travelDate)
+            {
+                auto matchQuality = GetMatchQuality(fns, route, railcard, ticketcode);
+                if (matchQuality > maxMatchQuality)
+                {
+                    maxMatchQuality = matchQuality;
+                    bestMatch = p->second;
+                }
+            }
+        }
+    }
+    if (maxMatchQuality < 1)
+    {
+        std::cout << "nothing found\n";
+    }
+    else
+    {
+        std::cout << bestMatch->originCode_ << bestMatch->destinationCode_ << bestMatch->route_ << bestMatch->railcard_ << bestMatch->ticketCode_ << "\n";
+    }
+    return bestMatch;
+}
+
+
+std::string GetNDFDetailsAsString(const RJISTypes::NDFMainValue& ndf)
+{
+	std::ostringstream oss;
+	oss << ndf.route_ << " " << ndf.railcardCode_ << " " << ndf.ticketCode_ << " " << "end: " << ndf.seqDates_.GetEndDate() << " start: " <<
+							ndf.seqDates_.GetStartDate() << " quote: " << ndf.seqDates_.GetQuoteDate();
+	return oss.str();
+}
+
+// Suppression set is a non-multiset since once we have found all NDFs for a given flow, railcard and date, the combo of route and ticket
+// code will be unique:
+typedef std::set<NDFFoundKey> SuppressionSet;
+
+// list of NDFs found - this is a multimap since for each flow there may be several ticket code, route combos:
+typedef std::multimap<UFlow, RJISTypes::NDFMainValue> NDFFoundMap;
+
+// a secondary index by route and ticket code into the found map - there should only be one entry for the
+// combination of route and ticket code:
+typedef std::map<NDFFoundKey, NDFFoundMap::iterator> FoundMapIndex;
+
+void ProcessNDFs(NDFFoundMap& allFoundNDFs, UFlow flow, std::string railcard, RJISDate::Date queryDate, RJISDate::Date travelDate)
+{
+	NDFFoundMap foundNDFs;
+	FoundMapIndex foundMapIndex;
+	SuppressionSet suppressionSet;
+
+	// first build the list of matching NDFs for this flow and railcard combination for the travel date and query date
+	// concerned:
+	RailcardCode rcode(railcard);
+	auto ndfIters = RJISMaps::ndfMain.equal_range(flow);
+	for (auto ndfEntry = ndfIters.first; ndfEntry != ndfIters.second; ++ndfEntry)
+	{
+		auto &ndf = ndfEntry->second;
+		// if the NDF is valid for travel on the travel date and the quote date allows querying on this date,
+		// insert it into the NDF found map:
+		if (ndf.railcardCode_ == railcard &&
+			queryDate >= ndf.seqDates_.GetQuoteDate() &&
+			travelDate >= ndf.seqDates_.GetStartDate() && 
+			travelDate <= ndf.seqDates_.GetEndDate())
+		{
+			foundNDFs.insert(std::make_pair(flow, ndf));
+			std::cout << "stored NDF - line " << ndf.linenumber << " " << GetNDFDetailsAsString(ndf) << "\n";
+		}
+	}
+
+	// index all found NDFs by (route, ticket code):
+	for (auto ndfEntry = std::begin(foundNDFs); ndfEntry != std::end(foundNDFs); ++ndfEntry)
+	{
+		NDFFoundKey key(ndfEntry->second.route_, ndfEntry->second.ticketCode_);
+		foundMapIndex.insert(std::make_pair(key, ndfEntry));
+	}
+
+	// next examine the NFOs - (1) an NFO can be an ordinary NDF or (2) it can replace an existing NDF or (3) it can
+	// suppress an NDF between the NFOs start and end dates
+
+	std::cout << "searching for NFOs\n";
+	auto nfoIters = RJISMaps::nfoMain.equal_range(flow);
+	if (nfoIters.first == nfoIters.second)
+	{
+		std::cout << "No NFOs found\n";
+	}
+	for (auto nfoEntry = nfoIters.first; nfoEntry != nfoIters.second; ++nfoEntry)
+	{
+		auto &nfo = nfoEntry->second;
+		// is this a suppression 
+		if (nfo.suppressionMarker_.IsIndicated())
+		{
+			// can the suppression be used today? Only store it if it can suppress based on the query date (usually today)
+			// and the intended date of travel. We store it since we might use it to replace an NFO
+			if (queryDate >= nfo.seqDates_.GetQuoteDate() && travelDate >= nfo.seqDates_.GetStartDate() &&
+				travelDate <= nfo.seqDates_.GetEndDate() && nfo.railcardCode_ == railcard)
+			{
+				std::cout << "NFO suppression stored - line " << nfo.linenumber + 1 << " " << GetNDFDetailsAsString(nfo) << "\n";
+				// store this suppression for route and ticket code comparison later - this is case 3:
+				NDFFoundKey suppression;
+				suppression.route_ = nfo.route_;
+				suppression.ticketCode_ = nfo.ticketCode_;
+				suppressionSet.insert(suppression);
+			}
+		}
+		else
+		{
+			// this NFO is like an NDF, so do the same date comparison and if it passes
+			// check to see if there is an existing NDF with the same route and ticket code:
+			if (nfo.railcardCode_ == railcard &&
+				queryDate >= nfo.seqDates_.GetQuoteDate() &&
+				travelDate >= nfo.seqDates_.GetStartDate() &&
+				travelDate <= nfo.seqDates_.GetEndDate())
+			{
+				auto existingNDF =  foundMapIndex.find(NDFFoundKey(nfo.route_, nfo.ticketCode_));
+				if (existingNDF == foundMapIndex.end())
+				{
+					std::cout << "NFO addition - line number " << nfo.linenumber + 1 << "\n";
+
+					// didn't find an existing NDF for this NFO, so just insert the NFO:
+					foundNDFs.insert(std::make_pair(flow, nfo));
+				}
+				else
+				{
+					std::cout << "NFO replacement\n";
+					// we found an existing NDF so this NFO replaces that NDF:
+					existingNDF->second->second = nfo;
+				}
+			}
+		}
+	}
+
+	// for each item in the suppression set, delete entries from the NDF found map:
+	for (auto suppression : suppressionSet)
+	{
+		auto existingNDF = foundMapIndex.find(suppression);
+		if (existingNDF != foundMapIndex.end())
+		{
+			std::cout << "deleting NFO\n";
+			foundNDFs.erase(existingNDF->second);
+		}
+	}
+
+	for (auto ndf : foundNDFs)
+	{
+		allFoundNDFs.insert(std::make_pair(ndf.first, ndf.second));
+	}
+}
+
+bool GetRailcardEntry(RJISTypes::RailcardValue& railcardEntry, std::string railcard, RJISDate::Date currentDate, RJISDate::Date travelDate)
+{
+    bool found = false;
+    auto matchingRailcards = RJISMaps::railcards.equal_range(railcard);
+    // check dates here later AMS:
+    for (auto p = matchingRailcards.first; p != matchingRailcards.second && !found; ++p)
+    {
+        if (p->second.seqDates_.GetQuoteDate() <= currentDate &&
+            p->second.seqDates_.GetEndDate() >= travelDate &&
+            p->second.seqDates_.GetStartDate() <= travelDate)
+        {
+            found = true;
+            railcardEntry = p->second;
+        }
+    }
+    return found;
+}
+
+bool GetTicketTypeEntry(RJISTypes::TicketTypeValue& ticketTypeEntry, TicketCode tty, RJISDate::Date currentDate, RJISDate::Date travelDate)
+{
+    bool found = false;
+    auto matchingTickets = RJISMaps::ticketTypes.equal_range(tty);
+    for (auto ttyRangeIterator = matchingTickets.first; ttyRangeIterator != matchingTickets.second && !found; ++ttyRangeIterator)
+    {
+        if (ttyRangeIterator->second.seqDates_.GetQuoteDate() <= currentDate &&
+            ttyRangeIterator->second.seqDates_.GetEndDate() >= travelDate &&
+            ttyRangeIterator->second.seqDates_.GetStartDate() <= travelDate)
+        {
+            found = true;
+            ticketTypeEntry = ttyRangeIterator->second;
+        }
+    }
+    return found;
+}
+
+bool GetStandardDiscount(int& percentage, StatusCode statusCode, DiscountCategory discountCategory, RJISDate::Date travelDate)
+{
+    bool found = false;
+    RJISTypes::SDiscountKey key(statusCode, discountCategory);
+    auto matchingDiscounts = RJISMaps::standardDiscounts.equal_range(key);
+    for (auto p = matchingDiscounts.first; p != matchingDiscounts.second && !found; ++p)
+    {
+        if (p->second.endDate_ >= travelDate)
+        {
+            found = true;
+            percentage = p->second.percentage_;
+        }
+    }
+    return found;
+}
+
+void ProcessFareList::GetAllFares(std::string& jsonToSendBack, std::string o, std::string d, std::string railcard, RJISDate::Date travelDate)
+{
+    // use today for "quote" dates
+    RJISDate::Date today(RJISDate::Date::Today());
+
+    // get the adult and child statuses for the railcard passed in:
+    StatusCode adultstatus;
+    StatusCode childstatus;
+    RJISTypes::RailcardValue railcardEntry;
+    bool railcardFound = GetRailcardEntry(railcardEntry, railcard, today, travelDate);
+    if (railcardFound)
+    {
+        adultstatus = railcardEntry.adultStatus_;
+        childstatus = railcardEntry.childStatus_;
+    }
+
+    std::string finalJSON = "{";
+    UNLC origin(o);
+    UNLC destination(d);
+    
+    // determine group stations, county codes and London zone codes - we use these to search in the
+    // NDF and NFO files - BUT we do not use clusters to search in the NDF or NFO files
+	std::deque<UNLC> allOrigins, allDestinations;
+	GetRelatedStations(allOrigins, origin, travelDate);
+	GetRelatedStations(allDestinations, destination, travelDate);
+    // include the origin and destination stations themselves:
+	allOrigins.push_back(origin);
+	allDestinations.push_back(destination);
+
+	// Generated a list of flows from any station in the flow list to any other station in the flow list.
+	// This is for NDFs and NFOs so it does not include clusters:
+    std::deque<UFlow> allNDFFlows;
+	PermuteNLCs(allNDFFlows, allOrigins, allDestinations);
+
+	// get a list of matching NDFs for every flow combination - each call to ProcessNDFs will
+    // add to the allNDFs container:
+	NDFFoundMap allNDFs;
+	for (auto& flow : allNDFFlows)
+	{
+		std::cout << "searching for NDF for " << flow << std::endl;
+		ProcessNDFs(allNDFs, flow, railcard, today, travelDate);
+	}
+
+    std::map<FoundFareKey, FoundFareValue> allFareResults;
+	for (auto p : allNDFs)
+	{
+        FoundFareKey fk;
+        fk.flow_ = p.first;
+        fk.route_ = p.second.route_;
+        fk.railcard_ = p.second.railcardCode_;
+        fk.ticketcode_ = p.second.ticketCode_;
+        FoundFareValue fv;
+        fv.isNDF = true;
+
+        // get the ticket class indicator (1, 2 or 9) from the ticket type file:
+        RJISTypes::TicketTypeValue ttv;
+        bool found = GetTicketTypeEntry(ttv, p.second.ticketCode_, today, travelDate);
+        if (found && ttv.ticketClass_ == 1)
+        {
+            fv.isFirst = true; // AMS DEBUG - add class
+        }
+        else
+        {
+            fv.isFirst = false;
+        }
+
+        allFareResults.insert(std::make_pair(fk, fv));
+        // print found NDFs for debugging purposes:
+        std::cout << p.first.origin << " " << p.first.destination << " " << p.second.route_ << " " <<
+			p.second.ticketCode_ << " " << p.second.adultFare_ << " " << p.second.childFare_ << " line " << p.second.linenumber + 1 << "\n";
+	}
+
+	std::deque<UNLC> allClusterOrigins = allOrigins;
+	std::deque<UNLC> allClusterDestinations = allDestinations;
+
+    // add the clusters to the origin and destination lists for searching in the flow maps:
+    GetClusters(allClusterOrigins, allOrigins, travelDate);
+    GetClusters(allClusterDestinations, allDestinations, travelDate);
+
+    std::deque<UFlow> flowlist;
+    PermuteNLCs(flowlist, allClusterOrigins, allClusterDestinations);
+
+    finalJSON += R"("journey": [)";
+    bool first = true;
+    for (auto flow : flowlist)
+    {
+        //std::cout << "flow : " << flow << std::endl;
+        // there may be several flow entries for each flow permutation but
+        // these will have different start and end dates:
+        auto matchingFlowEntries = RJISMaps::flowMainFlows.equal_range(flow);
+        for (auto p = matchingFlowEntries.first; p != matchingFlowEntries.second; ++p)
+        {
+            if (p->second.daterange_.IsDateInRange(travelDate))
+            auto& matchingFlowKey = p->first;
+            auto& matchingFlowValue = p->second;
+            if (matchingFlowValue.daterange_.IsDateInRange(travelDate))
+            {
+
+            }
+            if (first)
+            {
+                first = false;
+                finalJSON += "\n {";
+            }
+            else
+            {
+                finalJSON += ",{";
+            }
+
+            finalJSON += flow.GetJSON() + ", " + matchingFlowValue.GetJSON() + ", " + R"("fares": [)" + "\n";
+            std::cout << flow.GetString() << " " << matchingFlowValue.route_ << " " << matchingFlowValue.flowid_ << std::endl;
+
+            // get all the fare entries for this flow (they correspond to T records in the FFL file)
+            auto matchingFareEntries = RJISMaps::flowMainFares.equal_range(matchingFlowValue.flowid_);
+            bool first = true;
+            for (auto fareEntry = matchingFareEntries.first; fareEntry != matchingFareEntries.second; ++fareEntry)
+            {
+                if (first)
+                {
+                    first = false;
+                }
+                else
+                {
+                    finalJSON += ",";
+                }
+
+                auto& ticketCode = fareEntry->second.ticketCode_;
+
+                // we need to look in the ticket type file to get the discount category:
+                RJISTypes::TicketTypeValue ttypeEntry;
+                bool ticketTypeFound = GetTicketTypeEntry(ttypeEntry, ticketCode, today, travelDate);
+
+                if (matchingFlowValue.IsStandardDiscount())
+                {
+                    // we need to look in the ticket type file to get the discount category:
+                    RJISTypes::TicketTypeValue ttypeEntry;
+                    bool ticketTypeFound = GetTicketTypeEntry(ttypeEntry, ticketCode, today, travelDate);
+
+                    if (ticketTypeFound)
+                    {
+                        auto& discountCategory = ttypeEntry.discountCategory_;
+
+                        int adultfare = fareEntry->second.fare_;
+                        int childfare;
+                        int percentage;
+                        bool childDiscountFound = GetStandardDiscount(percentage, childstatus, discountCategory, travelDate);
+                        if (childDiscountFound)
+                        {
+                            childfare = Rounding(adultfare, percentage);
+                        }
+                        bool adultDiscountFound = GetStandardDiscount(percentage, adultstatus, discountCategory, travelDate);
+                        if (adultDiscountFound)
+                        {
+                            adultfare = Rounding(adultfare, percentage);
+                        }
+                        finalJSON += "{";
+                        finalJSON += JSONAddNV("ticketcode", ticketCode.GetString()) + ", ";
+                        finalJSON += JSONAddNV("adult", adultfare) + ", ";
+                        finalJSON += JSONAddNV("child", childfare) + ", ";
+                        finalJSON += JSONAddNV("rescode", fareEntry->second.rescode_.GetString()) + "}";
+                    }
+                    else
+                    {
+#error ADD LATER
+                    }
+                }
+                else // non-standard discount:
+                {
+                    auto nsd = GetNonStandardDiscount(matchingFlowKey, matchingFlowValue.route_, railcard, ticketCode, today, travelDate);
+                    int adultfare = fareEntry->second.fare_;
+                    int childfare;
+                    if (railcard != "   ")
+                    {
+                        if (nsd->adultNoDis_ == "N" && ticketTypeFound)
+                        {
+                            // N means calculate a standard discount for adults if a railcard is used
+                            // (a non-discounted adult fare is always taken directly from the flow file)
+                            auto& discountCategory = ttypeEntry.discountCategory_;
+
+                            int percentage;
+                            bool adultDiscountFound = GetStandardDiscount(percentage, adultstatus, discountCategory, travelDate);
+                            if (adultDiscountFound)
+                            {
+                                adultfare = Rounding(adultfare, percentage);
+                            }
+                        }
+                        else if (nsd->adultNoDis_ == "X")
+                        {
+                            // X means no adult fare can be calculated, so we use the "no fare" indicator of 99999999
+                            adultfare = 99999999;
+                        }
+                        else if (nsd->adultNoDis_ == "D")
+                        {
+                            // D means use the same fare - a discounted fare cannot be calculated:
+                            adultfare = adultfare; 
+                        }
+                        else if (nsd->adultNoDis_ == " ")
+                        {
+
+                        }
+                    }
+                    else
+                    {
+#error add later
+                    }
+                }
+
+            } // for each fare
+            finalJSON += "]"; // close fare array
+            finalJSON += "}"; // close one element of the journey array
+        } // for each flow found
+    }
+    finalJSON += "]}";
+    jsonToSendBack = finalJSON;
+}

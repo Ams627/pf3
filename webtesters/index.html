@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>Powerfares Test</title>
+
+<link rel="stylesheet" href="jui/jquery-ui.min.css">
+
+<style type='text/css'>
+body {
+    font-size: 1.5em;
+    background: rgba(235,233,249,1);
+    background: -moz-linear-gradient(left, rgba(235,233,249,1) 0%, rgba(216,208,239,1) 46%, rgba(206,199,236,1) 73%, rgba(193,191,234,1) 100%);
+    background: -webkit-gradient(left top, right top, color-stop(0%, rgba(235,233,249,1)), color-stop(46%, rgba(216,208,239,1)), color-stop(73%, rgba(206,199,236,1)), color-stop(100%, rgba(193,191,234,1)));
+    background: -webkit-linear-gradient(left, rgba(235,233,249,1) 0%, rgba(216,208,239,1) 46%, rgba(206,199,236,1) 73%, rgba(193,191,234,1) 100%);
+    background: -o-linear-gradient(left, rgba(235,233,249,1) 0%, rgba(216,208,239,1) 46%, rgba(206,199,236,1) 73%, rgba(193,191,234,1) 100%);
+    background: -ms-linear-gradient(left, rgba(235,233,249,1) 0%, rgba(216,208,239,1) 46%, rgba(206,199,236,1) 73%, rgba(193,191,234,1) 100%);
+    background: linear-gradient(to right, rgba(235,233,249,1) 0%, rgba(216,208,239,1) 46%, rgba(206,199,236,1) 73%, rgba(193,191,234,1) 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient( startColorstr='#ebe9f9', endColorstr='#c1bfea', GradientType=1 );
+}
+.imp1 {
+    margin-left:5%;
+    font-size:1em;
+}
+
+.sub {
+    margin-left:5%;
+    font-size:1.2em;
+}
+
+.d1 {
+    width: 1000px;
+    clear: both;
+}
+.d1 input {
+    width: 100%;
+    clear: both;
+}
+
+.tbox {
+    font-size:1.5em;
+    width:80%;
+    height:100px;
+}
+
+.faretable, td {
+    border:solid 1px #f5cbcb;
+    border-collapse:collapse;
+    padding-left:0.5em;
+    padding-right:0.5em;
+}
+
+.faretable {
+    margin-bottom:2em;
+}
+
+.GBP {
+    text-align:right;
+}
+.farespec {
+    font-weight:600;
+}
+
+.pbimg {
+    height:3em;
+}
+
+.plusbus {
+    position:absolute;
+    top:14em;
+    left:28em;
+    width:35%;
+}
+
+.railfares {
+    position:absolute;
+    top:14em;
+    left:2%;
+    width: 30%;
+}
+.timetable {
+    position:absolute;
+    top:14em;
+    left:56em;
+}
+.pfimg {
+    height:80px;
+}
+</style>
+<script src="jquery-2.1.4.min.js"></script>
+<script src="loc.js"></script>
+<script src="jui/external/jquery/jquery.js"></script>
+<script src="jui/jquery-ui.min.js"></script>
+<script>function startup() { $("#o").focus(); }</script>
+</head>
+
+<body onload="startup()">
+<div class="d1">
+<form id="target">
+  <label>Origin: </label><input class="imp1" maxlength="40" type="text" autocomplete="on" id="o" name="o"><br>
+  <label>Destination:</label> <input class="imp1" maxlength="40" type="text" autocomplete="on" id="d" name="d"><br>
+  <label>Railcard:</label> <input class="imp1" maxlength="3" type="text" autocomplete="on" id="r" name="r"><br><br>
+  <input class="sub" type="submit" value="Get Fares">
+</form>
+</div>
+<div id="fares"></div>
+
+<script>
+    var stations = railLocations.map(function (stationEntry) {
+        var displayname = stationEntry.name.trim() + " (" + stationEntry.nlc + ")";
+        var obj = { "label": displayname, "value": displayname, "id": stationEntry.nlc };
+        return obj;
+    })
+    $("#o").autocomplete({ source: stations, delay: 0, autoFocus: true, select: function (event, ui) { requestOrigin = ui.item.id; } });
+    $("#d").autocomplete({ source: stations, delay: 0, autoFocus: true, select: function (event, ui) { requestDestination = ui.item.id; } });
+    function ToGBP(n) {
+        var result;
+        // fares of 99999999 and 10p and 5p fares are not valid:
+        if (n != 99999999 && n != 10 && n != 5) {
+            s = n.toString();
+            result = "&pound;" + s.substr(0, s.length - 2) + "." + s.substr(s.length - 2);
+        }
+        else {
+            result = "-";
+        }
+        return result;
+    }
+
+    function GetPBAdultChild(s) {
+        var result = "";
+        if (s.a) {
+            if (s.a == 99999999)  {
+                result += "<td>-</td>";
+            }
+            else {
+                result += "<td>" + ToGBP(s.a) + "</td>";
+            }
+        }
+        else {
+            result += "<td>-</td>"
+        }
+        if (s.c) {
+            if (s.c == 99999999) {
+                result += "<td>-</td>";
+            }
+            else {
+                result += "<td>" + ToGBP(s.c) + "</td>";
+            }
+        }
+        else {
+            result += "<td>-</td>"
+        }
+        return result;
+    }
+
+    function compFunc(fare1, fare2)  {
+        var result = 0;
+        if (fare1.cl != fare2.cl) {
+            result = fare1.cl - fare2.cl;
+        }
+        else if (fare1.tt != fare2.tt) {
+            result = fare1.tt.charCodeAt(0) - fare2.tt.charCodeAt(0);
+        }
+        else if (fare1.a != fare2.a) {
+            result = fare2.a - fare1.a;
+        }
+        else if (fare1.c != fare2.c) {
+            result = fare2.c - fare1.c;
+        }
+        return result;
+    }
+    
+    function GetTimeFromMinutes(minutes)  {
+        result = ((minutes / 60) | 0).toString() + ":";
+        mins = minutes % 60;
+        if (mins < 10) {
+            result += "0";
+        }
+        result += mins.toString();
+        return result;
+    }
+
+    // return the string "NDF/NFO" if flow id is -1 otherwise return the string "flowID" followed by the flowID rounded
+    // to seven digits:
+    function GetFlowID(flowid) {
+        if (flowid == -1)  {
+            result = "NDF/NFO";
+        } else {
+            var s = "0000000000" + flowid;
+            result = "flow id: " + s.substr(s.length - 7);
+        }
+        return result;
+    }
+
+    function GetDiscount(discount) {
+        var result = "";
+        if (discount == 0) {
+            result = "discount: rail standard";
+        } else if (discount == 1) {
+            result = "discount: rail non-standard";
+        } else if (discount == 2) {
+            result = "discount: private standard";
+        } else if (discount == 3) {
+            result = "discount: private non-standard";
+        }
+        return result;
+    }
+
+    $("#target").submit(function (event) {
+        document.getElementById("fares").innerHTML = "";
+        var host = window.location.href.split('/')[0] + "//" + window.location.href.split('/')[2];
+        var uri = host + "/PFRJIS?o=" + requestOrigin + "&d=" + requestDestination + "&r=" + $('#r').val();
+        $.get(uri, function (data) {
+            console.log(data);
+            jinfo = JSON.parse(data);
+            console.log("parsed\n");
+            var s = "<div class=\"railfares\"><div class=\"pfimg\"><img src=\"tt5.png\"/></div>";
+            var flowlist = jinfo.fares.result[0].flows;
+            flowlist.map(function (flow) {
+                s += "<p class=\"farespec\">" + flow.o + " to " + flow.d + " route: " + flow.route + ", " + GetFlowID(flow.flowid) + ", " + GetDiscount(flow.discount) + "</p>\n<table class=\"faretable\"";
+                flow.fares.sort(compFunc)
+                s += "<tr><th>Cl.</th><th>Type</th><th>Adult</th><th>Child</th><th>Res.</th></tr>";
+                flow.fares.map(function (fare) {
+                    s += "<tr><td>" + fare.cl + "</td><td>" + fare.t + "</td><td class=\"GBP\">" + ToGBP(fare.a) + "</td><td class=\"GBP\">" + ToGBP(fare.c) + "</td><td>" + fare.r + "</td></tr>";
+                });
+                s += "</table>";
+            });
+            s += "</div>";
+            if (jinfo.times && jinfo.times.journeys && jinfo.times.journeys.length > 0)
+            {
+                s += "<div class=\"timetable\"><div class=\"pfimg\"><img src=\"clock.png\"/></div><table class=\"faretable\"><tr><th>depart</th><th>arrive</th></tr>";
+                jinfo.times.journeys.map(function (journey) {
+                    s += "<tr><td>" + GetTimeFromMinutes(journey.dep) + "</td>"
+                    s += "<td>" + GetTimeFromMinutes(journey.arr) + "</td></tr>"
+                });
+                s += "</table></div>";
+            }
+            var pb = jinfo.fares.result[0].plusbus;
+            if (pb && pb.fares) {
+                var blank = "<td>-</td><td>-</td>";
+                s += "<div class=\"plusbus\"><div class=\"pfimg\"><img class=\"pbimg\" src=\"Plusbus.svg\"/></div><table class=\"faretable\">";
+                s += "<tr><td>At origin on outbound date</td>" + (pb.fares.b0 ? GetPBAdultChild(pb.fares.b0) : blank) + "</tr>"
+                s += "<tr><td>At destination on outbound date</td>" + (pb.fares.b1 ? GetPBAdultChild(pb.fares.b1) : blank) + "</tr>"
+                s += "<tr><td>At destination on return date</td>" + (pb.fares.b2 ? GetPBAdultChild(pb.fares.b2) : blank) + "</tr>"
+                s += "<tr><td>At origin on return date</td>" + (pb.fares.b3 ? GetPBAdultChild(pb.fares.b3) : blank) + "</tr>"
+
+
+                s += "<tr><td>Weekly bus at origin</td>" + (pb.fares.sw0 ? GetPBAdultChild(pb.fares.sw0) : blank) + "</tr>"
+                s += "<tr><td>Weekly bus at destination</td>" + (pb.fares.sw1 ? GetPBAdultChild(pb.fares.sw1) : blank) + "</tr>"
+
+                s += "<tr><td>Monthly bus at origin</td>" + (pb.fares.sm0 ? GetPBAdultChild(pb.fares.sm0) : blank) + "</tr>"
+                s += "<tr><td>Monthly bus at destination</td>" + (pb.fares.sm1 ? GetPBAdultChild(pb.fares.sm1) : blank) + "</tr>"
+
+                s += "<tr><td>Quarterly bus at origin</td>" + (pb.fares.sq0 ? GetPBAdultChild(pb.fares.sq0) : blank) + "</tr>"
+                s += "<tr><td>Quarterly bus at destination</td>" + (pb.fares.sq1 ? GetPBAdultChild(pb.fares.sq1) : blank) + "</tr>"
+
+                s += "<tr><td>Annual bus at origin</td>" + (pb.fares.sa0 ? GetPBAdultChild(pb.fares.sa0) : blank) + "</tr>"
+                s += "<tr><td>Annual bus at destination</td>" + (pb.fares.sa1 ? GetPBAdultChild(pb.fares.sa1) : blank) + "</tr>"
+
+                s += "</table></div>";
+            }
+            else {
+                s += "<div class=\"plusbus\"><div class=\"pfimg\"><img class=\"pbimg\" src=\"Plusbus.svg\"/></div><p>Plusbus not available</div></p>";
+            }
+            document.getElementById("fares").innerHTML = s;
+            $("#o").focus();
+});
+  event.preventDefault();
+});
+</script>
+</body>
+</html>

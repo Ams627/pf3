@@ -1,0 +1,261 @@
+for fares calculation we need
+
+done 1. flow
+done 2. ndf
+done 3. nfo
+done 4. location (for groups)
+done 5. clusters (only for flow search)
+done 6. ticket types (for discounts)
+done 7. railcards (for discounts)
+done 8. non-standard discounts (for hardly any fares)
+done 9. status discounts
+10. railcard minimum fares
+11. IDMS ticket type descriptions
+12. IDMS route descriptions
+13. Some feed containing restriction descriptions
+14. London terminals feed
+
+std::map<int, std::vector<FareInfo>> where the int is the flowid
+
+FareInfo
+{
+    TicketCode ticketCode_;
+    Fare adultFare_;
+    Fare childFare_;
+    Restriction rescode_;
+}
+
+How do we process NDFs
+----------------------
+m1 and supp are std::maps:
+
+Get all valid non-suppression NDFs for the flow, travel date,
+current date and chosen railcard into m1.
+m1 will contain a mapping of (route, ticket type)->(adult price, child price)
+
+For each NFO that matches the flow:
+
+1. if it is a suppression whose quote date is past, 
+   store it in the supp map (route, ticket type)->daterange.
+
+2. if not a suppression, if it is matches a (route, ticket type) in m1, replace that entry in m1
+
+3. for each suppression, delete entries in m1 that match.
+
+4. Add the entries in m1 to the output map
+
+4. Get all the flows from the FFL.
+
+5. Any flows that match the (route, ticket type) in m1 must be ignored.
+
+
+Group stations
+--------------
+
+Problem 1) Given a station, get a list of groups of which it is a member
+Problem 2) Given a group, get a list of its members
+
+
+Non-standard discounts
+----------------------
+
+Store the entire file as a deque
+
+Form an std::set of deque iterators for the wildcard origins
+For a std::set of deque iterators for the wildcard destinations
+
+Use UNLC("****") as wildcard
+
+std::map<UNLC, std::set<ITERATOR>> M2;
+
+
+Is there an exact origin match? Yes, store an M2::iterator for the origin otherwise store an M2::iterator for
+the wildcard.
+
+Do the same for destination.
+
+Form the intersection of the two sets - we end up with a set of std::deque iterators
+
+Check for an exact railcard match, if not use the wildcard matches
+Check for an exact 
+
+
+Quick algorithm
+---------------
+make a
+	std::multimap(origin, deque-iterator)
+	std::multimap(dest, deque-iterator)
+
+Find(o, d)
+{
+	is there a origin match?
+		y: doProcessing of matching origins:
+		n: is there a destination match?
+			y: doProcessing of matching destinations:
+}
+
+== Storing Results ==
+
+Results are stored by 
+
+== storing NDFs ==
+
+NDFs are stored in the normal FareResultMap, but for any given o/d/r request we need
+to store the fact that we have an NDF against route/ticket/railcard
+
+When we are searching flows, we do not add any result to the map for the given route/ticket/railcard if 
+the ndfFoundMap already contains the result.
+
+
+== processing non-standard discounts ==
+
+Non-standard discounts are used to discount flows from the FFL file where the non-standard discount indicator is 1 or 3.
+For a non-standard discount to match, there must be a match in all fields: 
+origin
+destination
+route
+railcard
+ticket
+
+in the NSD list, a discount may be specified with any of the fields as wildcards though it seems to be impossible for
+both origin and destination to be wildcards in the same NSD.
+
+Either the origin or the destination specified in the NSD file can be a group
+station (from Location L or M records), though an exact match (with an individual NLC) is a better match.
+
+Example:
+
+R1444**** ***** *** ***
+R1444**** 00000 *** ***
+R1072**** ***** *** ***
+
+All match Euston-to-anywhere
+
+The question is, does 1072 with a specific route beat 1444 with any route. And the answer is no, 1444 EUS is an
+individual NLC - it therefore trumps anything with a group NLC code
+
+
+
+=== Processing Plusbus ===
+We need an extra plusbus file of forbidden origin-destination combinations. This will be called PFAUX.PLUSBUS
+
+Q1. Can we have Plusbus to a group station
+
+Yes, definitely. For example: 0418->J809.
+
+Q2. Can we sell PB tickets at the place of origin.
+
+Yes, that is allowed. However, for obvious reasons it is pointless doing this from a TVM.
+
+Q3. Is there a return plusbus ticket?
+
+No. We must sell two singles. Plusbus tickets cannot be open-dated so a date
+must be specified for the outward and return legs. The outward leg is normally today. Where a
+plusbus ticket is required for the return journey remember that the fare may change between the outward
+journey and return journey. 
+
+Where a return date is not specified, a return plusbus ticket cannot be sold. We will then
+only offer a plusbus ticket for the day of departure.
+
+Q4. Are there period plusbus tickets
+
+Yes. We only sell PBD and PB7 tickets however. PF will return all plusbus tickets.
+
+
+Q5. How do we send back the JSON?
+
+Like this:
+plusbus: { "o": "0461", "d": "5883", "po:" "K790", "pd":"H132" 
+"fares:" {"0": 400, "1": 410, "2": 420, "3": 400}
+}
+
+e.g. Poole to Basingstoke
+
+0 = plusbus at poole on date of departure
+1 = plusbus at basingstoke on date of departure from poole
+2 = plusbus at basingstoke on date of return from basingstoke
+3 = plusbus at poole on date of return from basingstoke
+
+Where no plusbus is available then no PB element is returned - we can test this by (javascript example)
+if (r.fares.result.plusbus) {}
+
+if the plusbus element is present, b0 will be present if there is a plusbus fare at the origin for the travel date and b1 will
+be present if there is a plusbus fare at the destination for the travel date. It is thus possible that b0 is absent and b1 is
+present (and clearly vice versa). If the plusbus element is present at all, the one of b0 or b1 must be present.
+
+Neither b2 nor b3 will be present if any of the following conditions are true:
+1. no return date specified
+2. the return date is invalid
+3. the return date is before the start date
+
+Either b2 or b3 or both will be absent if there are no plusbus fares for either the destination on the return date or the origin on the return date.
+
+For each season ticket plusbus type there are two sets of child/adult fares. There are season ticket types as follows:
+PB7 7-day ticket (represented by SW in the JSON),
+BMS one month season (represented by SM in the JSON)
+BQS quarterly season (represented by SQ in the JSON)
+BAS annual season (represented by SA in the JSON)
+
+For each season ticket type, we have a price at the origin and a price at the destination - these are represented by suffixing 
+0 or 1 to the JSON representations above - thus SW0, SW1, SM0, SM1, SQ0, SQ1, SA0, SA1. Any or all of these can be absent.
+
+=== Auxilliary data files that we need to create by hand or with data from the data supplier ===
+1. PBAUX.PLUSBUSR
+2. PBAUX.PLUSBUSNLC
+2. PBAUX.GROUPS
+3. PBAUX.PARKING
+
+
+How do plusbus restrictions work?
+
+If there is a direct restriction, then no plusbus fares are returned. If either the origin or
+destination is a group station, we must expand the group to a list of its members.
+
+For example: Gi is a group station code which has members Gi.mj Gi.m(j+1), Gi.m(j+2) etc.
+
+S->G1: check restrictions list for S->G1.m1 and S->G1.m2
+G2->S: check restrictions list for G2.m1->S and G2.m2->S
+G3->G4 check restrictions list for G3.m1->G4.m1, G3.m1->G4.m2, G3.m2->G4.m1 and G3.m2->G4.m2
+
+If there is a match for any of the restrictions then do not sell a plusbus ticket.
+
+
+
+How do we search for a plusbus ticket?
+--------------------------------------
+
+Given (o, d) we need to get b0, b1, b2, b3, sw, sm, sq and sa.
+
+b0 = pbo->o. We need to form a set of search-pairs for PBO->O.
+If O=5883 (POOLE), we search in the plusbus NLC list for 5883 which gives us H132 - then we search for H132->5883 in the NDF/NFO lists.
+
+if O=5961 (Dorchester South), we search for 5961 and 0429 (Dorchester group station) in the plusbus list - this
+gives us no results since Dorchester does not have plusbus.
+
+if O=5007 (Canterbury West), we must also consider "related" stations - i.e. the group station 0428 in this case.
+We search for 5007 and 0428 (Canterbury station group) in the plusbus NLC list. This gives us J157. We always take only the
+first plusbus NLC found since there should be only one for each station. If there is more than one then the plusbus data
+is erroneous.
+
+To calculate b0, we search for fares from J157->5007 and J157->0428
+
+
+Timetable info
+--------------
+
+As well as CRSMinuteMap we need a direct journey set for each station. Only if a CRS-CRS combination is in that map
+do we report the times. We get two sets of entries from CRSminutemap - one for the origin and for the destination and find 
+the intersection of these two maps
+
+
+Journey planning
+----------------
+Powerfares is a journey plan consumer. Jouney plans are produced by a separater package: Powerplanner. The output
+from powerplanner is a set of .plan files
+
+Each station in the UK has a .plan file with journey plans to all other stations. Each destination station occupies
+one line in the .plan file. .plan files are placed in the JP folder under the auxilliary files folder. A .plan file
+for Poole would be jPOO.plan. The prefix j is necessary because some three-letter device names are reserved in Windows 
+(not on other operating systems though). Thus AUX.plan and PRN.plan are not permitted.
+
+When we are generating a journey plan we 

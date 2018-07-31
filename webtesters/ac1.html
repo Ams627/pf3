@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <title>Test</title>
+    <link rel="stylesheet" href="jui/jquery-ui.min.css">
+
+    <style type='text/css'>
+        body {
+            font-size: 2em;
+        }
+        .imp1 {
+            margin-left: 5%;
+            text-transform: uppercase;
+            font-size: 1.2em;
+        }
+        .d1 {
+            width: 1000px;
+            clear: both;
+        }
+        .d1 input {
+            width: 100%;
+            clear: both;
+            background-color:transparent;
+        }
+        .tbox {
+            font-size: 1.5em;
+            width: 80%;
+            height: 100px;
+        }
+    </style>
+    <script src="jquery-2.1.4.min.js"></script>
+    <script src="jui/external/jquery/jquery.js"></script>
+    <script src="jui/jquery-ui.min.js"></script>
+</head>
+<body>
+
+
+    <div class="d1">
+        <form id="target">
+            <label>Origin: </label><input class="imp1" maxlength="40" type="text" autocomplete="on" id="o" name="o"><br>
+            <label>Destination:</label> <input class="imp1" maxlength="40" type="text" autocomplete="on" id="d" name="d"><br>
+            <input class="imp1" type="submit" value="Submit">
+        </form>
+    </div>
+    <script>
+        var railLocations = [
+            { "nlc": "5883", "name": "POOLE            ", "crs": "POO" },
+            { "nlc": "5884", "name": "SWAY             ", "crs": "SWY" },
+            { "nlc": "5885", "name": "POKESDOWN        ", "crs": "POK" },
+            { "nlc": "5886", "name": "BROCKENHURST     ", "crs": "BCU" },
+        ];
+    var stations = railLocations.map(function (stationEntry) {
+        var displayname = stationEntry.name.trim() + " (" + stationEntry.nlc + ")";
+        var obj = { "label": displayname, "value": displayname, "id": stationEntry.nlc };
+        return obj;
+    })
+    $("#o").autocomplete({
+        source: stations,
+    });
+
+    $("#o").keydown(function (e) {
+        if (e.which == 9)
+            alert("YEYYYYYYY!!!");
+    });
+
+    $("#d").autocomplete({ source: stations, select: function (event, ui) { alert(ui.item.id); } });
+    </script>
+</body>
+</html>
